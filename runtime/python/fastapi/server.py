@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+import re
 import sys
 import argparse
 import logging
@@ -21,6 +22,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import numpy as np
+import torchaudio
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append('{}/../../..'.format(ROOT_DIR))
 sys.path.append('{}/../../../third_party/Matcha-TTS'.format(ROOT_DIR))
@@ -36,12 +38,34 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"])
 
+def text_generator(user_text):
+    '''
+    # 按多个符号拆分句子
+    
+    '''
+    
+    pattern = r'[。！？，；：]'
+    text_list = re.split(pattern, user_text)
+    for text in text_list:
+        if text.strip():
+            yield text
 
 def generate_data(model_output):
     for i in model_output:
         tts_audio = (i['tts_speech'].numpy() * (2 ** 15)).astype(np.int16).tobytes()
         yield tts_audio
 
+def generate_data_wav(model_output):
+    '''
+    # 生成wav文件
+    '''
+    for i, j in enumerate(model_output):
+        filename = f"zero_shot_{i}.wav"
+        torchaudio.save(filename, j['tts_speech'], cosyvoice.sample_rate)
+        with open(filename, "rb") as audio_file:
+            tts_audio = audio_file.read()
+            os.remove(filename)
+            yield tts_audio
 
 @app.get("/inference_sft")
 @app.post("/inference_sft")
@@ -53,9 +77,30 @@ async def inference_sft(tts_text: str = Form(), spk_id: str = Form()):
 @app.get("/inference_zero_shot")
 @app.post("/inference_zero_shot")
 async def inference_zero_shot(tts_text: str = Form(), prompt_text: str = Form(), prompt_wav: UploadFile = File()):
+    '''
+    按照传入的说话人音频文件，进行音频克隆
+    缓存说话人信息，在每次请求时，判断是否有相同的prompt_text，如果有，则直接使用，否则进行音频克隆
+    目的增加生成速度
+    '''
+    # speeck_dict_text内是否包含prompt_text
+    my_zero_shot_spk = prompt_text
+    if my_zero_shot_spk not in speeck_dict_text:
+        print('add zero shot spk:', my_zero_shot_spk)
+        prompt_speech_16k = load_wav(prompt_wav.file, 16000)
+        assert cosyvoice.add_zero_shot_spk(prompt_text, prompt_speech_16k, my_zero_shot_spk) is True
+        speeck_dict_text.append(my_zero_shot_spk)
+        cosyvoice.save_spkinfo()
+    # model_output = cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k)
+    model_output = cosyvoice.inference_zero_shot(text_generator(tts_text), '', '', zero_shot_spk_id=my_zero_shot_spk, stream=False)
+    return StreamingResponse(generate_data_wav(model_output))
+
+
+@app.get("/inference_zero_shot2")
+@app.post("/inference_zero_shot2")
+async def inference_zero_shot2(tts_text: str = Form(), prompt_text: str = Form(), prompt_wav: UploadFile = File()):
     prompt_speech_16k = load_wav(prompt_wav.file, 16000)
     model_output = cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k)
-    return StreamingResponse(generate_data(model_output))
+    return StreamingResponse(generate_data_wav(model_output))
 
 
 @app.get("/inference_cross_lingual")
